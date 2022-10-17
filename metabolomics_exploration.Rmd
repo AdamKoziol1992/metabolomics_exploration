@@ -1,0 +1,133 @@
+---
+title: "Metabolomics exploration - SSI"
+author: "Adam_Koziol"
+date: "2022-10-17"
+output: pdf_document
+---
+
+First we'll set up the environment. For this it will be in my Github account under the repository 'metabolomics_exploration'
+```{r include=FALSE}
+setwd('~/Documents/GitHub/metabolomics_exploration/')
+```
+
+Next we'll load in all the packages we'll be using throughout this analysis - Most of it will be in the tidyverse framework which contains most of the packages required
+```{r include=FALSE}
+library(tidyverse)
+library(Hmsc)
+library(MetaboDiff)
+library(logisticPCA)
+library(ggcorrplot)
+library(factoextra)
+library(ggfortify)
+library(pheatmap)
+```
+
+Load in all the data files
+```{r}
+metadata <- read.csv('./metabolomics_data/metadata_GNPS_table_AMG_key_ones_cleaned.txt', sep = '\t')
+data <- read.csv('./metabolomics_data/MZmine-GNPS_AG_test_featuretable.csv')
+```
+
+We'll start to explore the data by first checing what types of data we're working with in both files - Starting with the metadata
+```{r}
+head(metadata)
+str(metadata) ##Here we have the metadata and the associated data types, in all cases these are characters which will be converted into factors later                          on. I don't like the use of 'ATTRIBUTE_' as it is redundant so for now lets remove that
+metadata <- metadata %>%
+  rename_with(~str_remove(., 'ATTRIBUTE_'))
+```
+
+Now lets do the same with the data file
+```{r}
+head(data) ###The column names denoting the sample dont match the metadata due to the X and also the peak.area
+str(data) ###All data types are numeric which make sense, however since row.ID is denoting a unique metabolite, we can go ahead and change this to character
+
+data <- data %>%
+  rename_at(4:length(.), ~str_remove(., '^X')) %>%
+  rename_at(4:length(.), ~str_remove(., '.Peak.area')) %>%
+  mutate(row.ID = as.character(row.ID))
+```
+
+Its important to see how our data is structured, do we have missing data, how is our data distributed and so on. So we'll start by checking the completeness of our metadata dataframe by checking for the number of NAs and the number of blank cells
+```{r}
+colSums(is.na(metadata)) ###There is no NAs meaning that missing data is like coded as ''
+sum(which(metadata=="")) ###in total there are 2032816 cells which are blank in the metadata 
+```
+We will check for number of blank cells as well, but for convenience here we'll create a function to easily summarise this
+```{r}
+my_vec <- colnames(metadata)
+
+summarise_value_counts <- function(df, column){ ####This function takes a dataframe and column, groups it by that column and summarises the number of times each value appears
+  df %>%
+    group_by(metadata[as.character(column)]) %>%
+    summarise(n=n())
+}
+
+my_list <- list(map(df=metadata, .x=my_vec, .f=summarise_value_counts)) ###In almost all columns of the metadata the majority of cells are blank
+```
+
+For the the 'data' dataframe we will double check for no na values as well
+```{r}
+colSums(is.na(data)) ##looks good no NA values
+
+##We can check how the data is distributed as well, its better that the data is in long format for this
+
+data %>%
+  pivot_longer(cols = 4:length(.), names_to = 'sample_id', values_to = 'ms_frequency') %>%
+  group_by(sample_id) %>%
+  mutate(detection = if_else(ms_frequency > 0, 1, 0),
+         detection = as.numeric(detection)) %>%
+  ggplot(., aes(y=detection, fill = detection, colour = detection)) +
+  geom_histogram(binwidth = 0.5, aes(colour=detection)) +
+  scale_y_continuous(breaks=c(0, 1),
+                     labels = c('no_detection', 'detection')) +
+  theme_minimal() +
+  ylab('detected in MS or not') +
+  xlab('# of values above zero') +
+  ggtitle('We can see that the majority of values/n are above zero
+          suggesting that this is not zero-inflated') +
+  theme(axis.text.x = element_text(angle=90)) +
+  coord_flip() #####Most values have values above 0 
+```
+
+First exploratory analysis will be a PCA - this will allow us to interrelate all the data we've gathered from the 22 samples and determine how they orient themselves within a hyperdimensional space
+```{r}
+data_t <- data %>%
+  column_to_rownames('row.ID') %>%
+  select(-c(1:2)) %>%
+  t() %>%
+  as.data.frame()
+
+##Since we only have data from 22 samples in our subset we'll need to subset the metadata to match the data and make sure its in the same order
+metadata_subset <- metadata %>%
+  filter(filename %in% rownames(data_t)) %>%
+  column_to_rownames('filename') %>%
+  .[rownames(data_t),] %>%
+  select(c('TypesOfPlants', 'ExerciceFrequency'))
+
+
+module_pca=prcomp(data_t, scale = TRUE) ###Compute eigenvalues - due to high variance in MS data the data has been scaled to mean 0 - SD 1
+
+fviz_screeplot(module_pca) ###Screeplot to determine eigenvalue contributions - PCA1 explains ~22% of the variation
+
+```
+
+```{r}
+autoplot(module_pca, data = metadata_subset, shape = 'ExerciceFrequency', colour = 'TypesOfPlants', loadings = F, loadings.label = F) +
+  theme_bw() ##Seems like we do have some clustering based on the TypesofPlants consumed. The metabolite profile of people who each more or less plants are more similar to each other
+```
+
+As we can see, there is some evidence to suggest that certain features of the metabolome can differentiate through the PCA - it might be nice to overlay all of this data in a heatmap and see if the metabolite composition changes with respect to the metadata
+```{r}
+metadata_subset <- metadata_subset %>%
+  arrange(TypesOfPlants, ExerciceFrequency)
+
+data_t <- data_t[rownames(metadata_subset),] ###rearrange to be in the same format as the metadata
+
+pheatmap(data_t,
+         scale = 'column', ###We'll use z-scores to see how each metabolite changes across samples
+         annotation_row = metadata_subset,
+         cluster_rows = F) ###We can now see how the metabolite profile changes by the two complete metadata sets
+                           #we can see some metabolites are clearly giving more of a signal than others here
+                           #might be worth seeing which are differentially abundant or not - pick them out and do some predictive modelling with them
+```
+
